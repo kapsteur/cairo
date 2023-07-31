@@ -2318,3 +2318,79 @@ impl I128PartialOrd of PartialOrd<i128> {
         i128_diff(rhs, lhs).into_is_err()
     }
 }
+
+// TODO(yuval): once it's possible to create a literal (10, 16) for any uint/sint type, generalize this impl.
+// TODO(yg): move? (to to_string.cairo?)
+// TODO(yg): add for all bases.
+use byte_array::ByteArrayTrait;
+impl U8IntoHexAsciiByteArray of Into<u8, ByteArray> {
+    fn into(self: u8) -> ByteArray {
+        general_into_hex(self, 16_u8.try_into().unwrap())
+    }
+}
+
+impl U16IntoHexAsciiByteArray of Into<u16, ByteArray> {
+    fn into(self: u16) -> ByteArray {
+        general_into_hex(self, 16_u16.try_into().unwrap())
+    }
+}
+
+impl U32IntoHexAsciiByteArray of Into<u32, ByteArray> {
+    fn into(self: u32) -> ByteArray {
+        general_into_hex(self, 16_u32.try_into().unwrap())
+    }
+}
+
+impl U64IntoHexAsciiByteArray of Into<u64, ByteArray> {
+    fn into(self: u64) -> ByteArray {
+        general_into_hex(self, 16_u64.try_into().unwrap())
+    }
+}
+
+impl U128IntoHexAsciiByteArray of Into<u128, ByteArray> {
+    fn into(self: u128) -> ByteArray {
+        general_into_hex(self, 16_u128.try_into().unwrap())
+    }
+}
+
+impl U256IntoHexAsciiByteArray of Into<u256, ByteArray> {
+    fn into(self: u256) -> ByteArray {
+        general_into_hex(self, 16_u256.try_into().unwrap())
+    }
+}
+
+impl Felt252IntoHexAsciiByteArray of Into<felt252, ByteArray> {
+    fn into(mut self: felt252) -> ByteArray {
+        let as_u256: u256 = self.into();
+        as_u256.into()
+    }
+}
+
+// TODO(yg): doc.
+fn general_into_hex<
+    TUint,
+    impl DropImpl: Drop<TUint>,
+    impl CopyImpl: Copy<TUint>,
+    impl DivRemImpl: DivRem<TUint>,
+    impl TryIntoU8: TryInto<TUint, u8>,
+    impl ZeroableImpl: zeroable::Zeroable<TUint>
+>(
+    mut value: TUint, hex_base_nz: NonZero<TUint>,
+) -> ByteArray {
+    let mut result: ByteArray = "0x";
+    loop {
+        let (value, digit) = DivRem::div_rem(value, hex_base_nz);
+        let digit_as_u8: u8 = digit.try_into().unwrap();
+        result
+            .append_byte(if digit_as_u8 < 10 {
+                digit_as_u8 + '0'
+            } else {
+                digit_as_u8 - 10 + 'a'
+            });
+        if value.is_zero() {
+            break;
+        };
+    };
+    // TODO(yg): reverse.
+    result
+}

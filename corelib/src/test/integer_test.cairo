@@ -1644,3 +1644,11 @@ fn test_signed_int_diff() {
     assert_eq(@integer::i128_diff(4, 3).unwrap(), @1, 'i128: 4 - 3 == 1');
     assert_eq(@integer::i128_diff(3, 5).unwrap_err(), @~(2 - 1), 'i128: 3 - 5 == -2');
 }
+
+#[test]
+fn test_to_string_hex() {
+    let expected_string = "0x5a";
+    let s: ByteArray = 0x5a_u8.into();
+    // TODO(yg): impl PartialEq for ByteArray.
+    assert(s == expected_string, 'wrong hex representation');
+}
