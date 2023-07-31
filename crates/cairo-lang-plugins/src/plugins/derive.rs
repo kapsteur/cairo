@@ -10,11 +10,11 @@ use cairo_lang_syntax::attribute::structured::{
     AttributeArg, AttributeArgVariant, AttributeStructurize,
 };
 use cairo_lang_syntax::node::ast::{
-    AttributeList, MemberList, OptionWrappedGenericParamList, TerminalIdentifier, VariantList,
+    AttributeList, MemberList, OptionWrappedGenericParamList, VariantList,
 };
 use cairo_lang_syntax::node::db::SyntaxGroup;
 use cairo_lang_syntax::node::helpers::QueryAttrs;
-use cairo_lang_syntax::node::{ast, Terminal, TypedSyntaxNode};
+use cairo_lang_syntax::node::{ast, SyntaxNode, TypedSyntaxNode};
 use cairo_lang_utils::ordered_hash_map::OrderedHashMap;
 use indoc::indoc;
 use itertools::chain;
@@ -25,7 +25,7 @@ pub trait TraitDeriver: core::fmt::Debug + Send + Sync {
     fn trait_name(&self) -> &str;
 
     /// Derives the trait implementation for a type.
-    fn derive(&self, info: &DeriveInfo, derived: &TerminalIdentifier) -> DeriveResult;
+    fn derive(&self, info: &DeriveInfo, derived: &SyntaxNode) -> DeriveResult;
 
     /// Returns auxiliary data for the generated impl.
     fn aux_data(
@@ -85,12 +85,10 @@ impl DerivePlugin {
                     continue;
                 };
 
-                let [ast::PathSegment::Simple(segment)] = &path.elements(db)[..] else {
-                    continue;
-                };
-
-                let derived = segment.ident(db);
-                let Some(trait_deriver) = self.trait_derivers.get(derived.text(db).as_str()) else {
+                let derived = path.as_syntax_node();
+                let Some(trait_deriver) =
+                    self.trait_derivers.get(derived.clone().get_text_without_trivia(db).as_str())
+                else {
                     // TODO(spapini): How to allow downstream derives while also
                     //  alerting the user when the derive doesn't exist?
                     continue;
@@ -106,7 +104,7 @@ impl DerivePlugin {
                     // specific derive.
                     builder.patches.patches.push(Patch {
                         span: TextSpan { start, end },
-                        origin_span: derived.as_syntax_node().span(db),
+                        origin_span: derived.span(db),
                     });
                 }
                 diagnostics.extend(derive_result.diagnostics);
@@ -307,18 +305,21 @@ impl DeriveInfo {
     }
 
     /// Returns a node for the impl header.
-    fn impl_header(
+    pub fn impl_header(
         &self,
-        derived_trait: &TerminalIdentifier,
+        derived_trait: &SyntaxNode,
+        impl_name_suffix: &str,
         dependent_traits: &[RewriteNode],
     ) -> RewriteNode {
         RewriteNode::interpolate_patched(
-            "impl $name$$derived_trait$$generics_with_trait$ of $derived_trait$<$full_typename$>",
-            [
+            "impl $name$$impl_name_suffix$$generics_with_trait$ of \
+             $derived_trait$<$full_typename$>",
+            &[
                 ("name".into(), self.name.clone()),
-                ("derived_trait".into(), RewriteNode::from_ast(derived_trait)),
+                ("derived_trait".into(), RewriteNode::from(derived_trait.clone())),
+                ("impl_name_suffix".into(), RewriteNode::from(impl_name_suffix)),
                 ("full_typename".into(), self.full_typename()),
-                ("generics".into(), RewriteNode::from_ast(derived_trait)),
+                ("generics".into(), RewriteNode::from(derived_trait.clone())),
                 (
                     "generics_with_trait".into(),
                     self.generics.generics_with_trait_part(|t| {
@@ -327,7 +328,7 @@ impl DeriveInfo {
                             .map(|d| {
                                 RewriteNode::interpolate_patched(
                                     "impl $t$$d$: $d$<$t$>",
-                                    [("t".into(), t.clone()), ("d".into(), d.clone())].into(),
+                                    &[("t".into(), t.clone()), ("d".into(), d.clone())].into(),
                                 )
                             })
                             .collect()
@@ -338,7 +339,7 @@ impl DeriveInfo {
         )
     }
 
-    fn full_typename(&self) -> RewriteNode {
+    pub fn full_typename(&self) -> RewriteNode {
         RewriteNode::new_modified(vec![self.name.clone(), self.generics.generics_part()])
     }
 }
@@ -385,9 +386,9 @@ impl DeriveResult {
     pub fn from_diagnostic(diagnostic: PluginDiagnostic) -> Self {
         Self { code: None, diagnostics: vec![diagnostic] }
     }
-    pub fn unsupported_for_extern<T: TypedSyntaxNode>(node: &T) -> Self {
+    pub fn unsupported_for_extern(node: &SyntaxNode) -> Self {
         Self::from_diagnostic(PluginDiagnostic {
-            stable_ptr: node.as_syntax_node().stable_ptr(),
+            stable_ptr: node.stable_ptr(),
             message: "Unsupported trait for derive for extern types.".into(),
         })
     }
@@ -403,7 +404,7 @@ impl TraitDeriver for CloneDerive {
     fn trait_name(&self) -> &str {
         "Clone"
     }
-    fn derive(&self, info: &DeriveInfo, derived: &TerminalIdentifier) -> DeriveResult {
+    fn derive(&self, info: &DeriveInfo, derived: &SyntaxNode) -> DeriveResult {
         DeriveResult::from_node(RewriteNode::interpolate_patched(
             indoc! {"
             $header$ {
@@ -412,12 +413,13 @@ impl TraitDeriver for CloneDerive {
                 }
             }
         "},
-            [
+            &[
                 (
                     "header".into(),
                     info.impl_header(
                         derived,
-                        &[RewriteNode::from_ast(derived), RewriteNode::from("Destruct")],
+                        "Clone",
+                        &[RewriteNode::from(derived.clone()), RewriteNode::from("Destruct")],
                     ),
                 ),
                 ("full_typename".into(), info.full_typename()),
@@ -430,7 +432,7 @@ impl TraitDeriver for CloneDerive {
                                 children.push(RewriteNode::interpolate_patched(
                                     "            $name$::$variant_name$(x) => \
                                      $name$::$variant_name$(Clone::clone(x)),\n",
-                                    [
+                                    &[
                                         ("name".into(), info.name.clone()),
                                         ("variant_name".into(), variant.name.clone()),
                                     ]
@@ -446,7 +448,7 @@ impl TraitDeriver for CloneDerive {
                                 children.push(RewriteNode::interpolate_patched(
                                     "            $member_name$: \
                                      Clone::clone(self.$member_name$),\n",
-                                    [("member_name".into(), member.name.clone())].into(),
+                                    &[("member_name".into(), member.name.clone())].into(),
                                 ));
                             }
                             children.push("        }".into());
@@ -470,7 +472,7 @@ impl TraitDeriver for DestructDerive {
     fn trait_name(&self) -> &str {
         "Destruct"
     }
-    fn derive(&self, info: &DeriveInfo, derived: &TerminalIdentifier) -> DeriveResult {
+    fn derive(&self, info: &DeriveInfo, derived: &SyntaxNode) -> DeriveResult {
         DeriveResult::from_node(RewriteNode::interpolate_patched(
             indoc! {"
             $header$ {
@@ -479,8 +481,11 @@ impl TraitDeriver for DestructDerive {
                 }
             }
         "},
-            [
-                ("header".into(), info.impl_header(derived, &[RewriteNode::from_ast(derived)])),
+            &[
+                (
+                    "header".into(),
+                    info.impl_header(derived, "Destruct", &[RewriteNode::from(derived.clone())]),
+                ),
                 ("full_typename".into(), info.full_typename()),
                 (
                     "body".into(),
@@ -491,7 +496,7 @@ impl TraitDeriver for DestructDerive {
                                 children.push(RewriteNode::interpolate_patched(
                                     "            $name$::$variant_name$(x) => \
                                      traits::Destruct::destruct(x),\n",
-                                    [
+                                    &[
                                         ("name".into(), info.name.clone()),
                                         ("variant_name".into(), variant.name.clone()),
                                     ]
@@ -508,7 +513,7 @@ impl TraitDeriver for DestructDerive {
                                 members.iter().map(|member| {
                                     RewriteNode::interpolate_patched(
                                         "traits::Destruct::destruct(self.$member_name$);",
-                                        [("member_name".into(), member.name.clone())].into(),
+                                        &[("member_name".into(), member.name.clone())].into(),
                                     )
                                 }),
                                 "\n        ",
@@ -533,7 +538,7 @@ impl TraitDeriver for PanicDestructDerive {
     fn trait_name(&self) -> &str {
         "PanicDestruct"
     }
-    fn derive(&self, info: &DeriveInfo, derived: &TerminalIdentifier) -> DeriveResult {
+    fn derive(&self, info: &DeriveInfo, derived: &SyntaxNode) -> DeriveResult {
         DeriveResult::from_node(RewriteNode::interpolate_patched(
             indoc! {"
             $header$ {
@@ -542,8 +547,15 @@ impl TraitDeriver for PanicDestructDerive {
                 }
             }
         "},
-            [
-                ("header".into(), info.impl_header(derived, &[RewriteNode::from_ast(derived)])),
+            &[
+                (
+                    "header".into(),
+                    info.impl_header(
+                        derived,
+                        "PanicDestruct",
+                        &[RewriteNode::from(derived.clone())],
+                    ),
+                ),
                 ("full_typename".into(), info.full_typename()),
                 (
                     "body".into(),
@@ -554,7 +566,7 @@ impl TraitDeriver for PanicDestructDerive {
                                 children.push(RewriteNode::interpolate_patched(
                                     "            $name$::$variant_name$(x) => \
                                      traits::PanicDestruct::panic_destruct(x, ref panic),\n",
-                                    [
+                                    &[
                                         ("name".into(), info.name.clone()),
                                         ("variant_name".into(), variant.name.clone()),
                                     ]
@@ -572,7 +584,7 @@ impl TraitDeriver for PanicDestructDerive {
                                     RewriteNode::interpolate_patched(
                                     "traits::PanicDestruct::panic_destruct(self.$member_name$, \
                                      ref panic);",
-                                    [("member_name".into(), member.name.clone())].into(),
+                                    &[("member_name".into(), member.name.clone())].into(),
                                 )
                                 }),
                                 "\n        ",
@@ -597,7 +609,7 @@ impl TraitDeriver for PartialEqDerive {
     fn trait_name(&self) -> &str {
         "PartialEq"
     }
-    fn derive(&self, info: &DeriveInfo, derived: &TerminalIdentifier) -> DeriveResult {
+    fn derive(&self, info: &DeriveInfo, derived: &SyntaxNode) -> DeriveResult {
         DeriveResult::from_node(RewriteNode::interpolate_patched(
             indoc! {"
             $header$ {
@@ -610,8 +622,11 @@ impl TraitDeriver for PartialEqDerive {
                 }
             }
         "},
-            [
-                ("header".into(), info.impl_header(derived, &[RewriteNode::from_ast(derived)])),
+            &[
+                (
+                    "header".into(),
+                    info.impl_header(derived, "PartialEq", &[RewriteNode::from(derived.clone())]),
+                ),
                 ("full_typename".into(), info.full_typename()),
                 (
                     "body".into(),
@@ -621,7 +636,7 @@ impl TraitDeriver for PartialEqDerive {
                             for (i, lhs_variant) in variants.iter().enumerate() {
                                 children.push(RewriteNode::interpolate_patched(
                                     "            $name$::$variant_name$(x) => match rhs {\n",
-                                    [
+                                    &[
                                         ("name".into(), info.name.clone()),
                                         ("variant_name".into(), lhs_variant.name.clone()),
                                     ]
@@ -630,7 +645,7 @@ impl TraitDeriver for PartialEqDerive {
                                 for (j, rhs_variant) in variants.iter().enumerate() {
                                     children.push(RewriteNode::interpolate_patched(
                                         "                $name$::$variant_name$(y) => ",
-                                        [
+                                        &[
                                             ("name".into(), info.name.clone()),
                                             ("variant_name".into(), rhs_variant.name.clone()),
                                         ]
@@ -654,7 +669,7 @@ impl TraitDeriver for PartialEqDerive {
                                     members.iter().map(|member| {
                                         RewriteNode::interpolate_patched(
                                             "lhs.$member_name$ == rhs.$member_name$",
-                                            [("member_name".into(), member.name.clone())].into(),
+                                            &[("member_name".into(), member.name.clone())].into(),
                                         )
                                     }),
                                     " && ",
@@ -680,7 +695,7 @@ impl TraitDeriver for SerdeDerive {
     fn trait_name(&self) -> &str {
         "Serde"
     }
-    fn derive(&self, info: &DeriveInfo, derived: &TerminalIdentifier) -> DeriveResult {
+    fn derive(&self, info: &DeriveInfo, derived: &SyntaxNode) -> DeriveResult {
         DeriveResult::from_node(RewriteNode::interpolate_patched(
             indoc! {"
             $header$ {
@@ -692,12 +707,13 @@ impl TraitDeriver for SerdeDerive {
                 }
             }
         "},
-            [
+            &[
                 (
                     "header".into(),
                     info.impl_header(
                         derived,
-                        &[RewriteNode::from_ast(derived), RewriteNode::from("Destruct")],
+                        "Serde",
+                        &[RewriteNode::from(derived.clone()), RewriteNode::from("Destruct")],
                     ),
                 ),
                 ("full_typename".into(), info.full_typename()),
@@ -711,7 +727,7 @@ impl TraitDeriver for SerdeDerive {
                                     "            $name$::$variant_name$(x) => { \
                                      serde::Serde::serialize(@$idx$, ref output); \
                                      serde::Serde::serialize(x, ref output); },\n",
-                                    [
+                                    &[
                                         ("name".into(), info.name.clone()),
                                         ("idx".into(), RewriteNode::Text(i.to_string())),
                                         ("variant_name".into(), variant.name.clone()),
@@ -729,7 +745,7 @@ impl TraitDeriver for SerdeDerive {
                                 members.iter().map(|member| {
                                     RewriteNode::interpolate_patched(
                                         "serde::Serde::serialize(self.$member_name$, ref output)",
-                                        [("member_name".into(), member.name.clone())].into(),
+                                        &[("member_name".into(), member.name.clone())].into(),
                                     )
                                 }),
                                 ";\n        ",
@@ -755,7 +771,7 @@ impl TraitDeriver for SerdeDerive {
                                     "if idx == $idx$ { \
                                      $name$::$variant_name$(serde::Serde::deserialize(ref \
                                      serialized)?) }\n            else ",
-                                    [
+                                    &[
                                         ("name".into(), info.name.clone()),
                                         ("idx".into(), RewriteNode::Text(i.to_string())),
                                         ("variant_name".into(), variant.name.clone()),
@@ -773,7 +789,7 @@ impl TraitDeriver for SerdeDerive {
                                 children.push(RewriteNode::interpolate_patched(
                                     "            $member_name$: serde::Serde::deserialize(ref \
                                      serialized)?,\n",
-                                    [("member_name".into(), member.name.clone())].into(),
+                                    &[("member_name".into(), member.name.clone())].into(),
                                 ));
                             }
                             children.push("        })".into());
@@ -797,9 +813,9 @@ impl TraitDeriver for EmptyDerive {
     fn trait_name(&self) -> &str {
         self.0
     }
-    fn derive(&self, info: &DeriveInfo, derived: &TerminalIdentifier) -> DeriveResult {
+    fn derive(&self, info: &DeriveInfo, derived: &SyntaxNode) -> DeriveResult {
         DeriveResult::from_node(RewriteNode::new_modified(vec![
-            info.impl_header(derived, &[RewriteNode::from_ast(derived)]),
+            info.impl_header(derived, self.0, &[RewriteNode::from(derived.clone())]),
             ";\n".into(),
         ]))
     }
