@@ -4,6 +4,7 @@ use cairo_lang_syntax::node::db::SyntaxGroup;
 use cairo_lang_syntax::node::{SyntaxNode, TypedSyntaxNode};
 use cairo_lang_utils::extract_matches;
 use cairo_lang_utils::unordered_hash_map::UnorderedHashMap;
+use itertools::Itertools;
 
 /// Interface for modifying syntax nodes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +103,18 @@ impl RewriteNode {
             }
             RewriteNode::Modified(modified) => modified,
             RewriteNode::Text(_) => panic!("A text node can't be modified"),
+        }
+    }
+
+    pub fn get_text(&self, db: &dyn SyntaxGroup) -> String {
+        match self {
+            RewriteNode::Trimmed { node, .. } => node.clone().get_text_without_trivia(db),
+            RewriteNode::Copied(node) => node.clone().get_text_without_trivia(db),
+            RewriteNode::Modified(ModifiedNode { children }) => match children {
+                Some(children) => children.iter().map(|child| child.get_text(db)).join(""),
+                None => "".to_string(),
+            },
+            RewriteNode::Text(text) => text.clone(),
         }
     }
 
